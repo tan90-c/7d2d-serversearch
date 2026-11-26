@@ -35,7 +35,7 @@ if (-not (Test-Path $ui)) {
     '<!doctype html><meta charset="utf-8"><title>7D2D Server Search</title>' +
     '<body style="font-family:sans-serif;padding:2rem">' +
     'UI placeholder. Put your own page at ui\index.html and rebuild. ' +
-    'API: /api/master /api/seeds /api/query?addr=IP:PORT /api/seed?add=IP:PORT /api/ping' |
+    'API: /api/master /api/query?addr=IP:PORT /api/ping' |
     Set-Content -Path $ui -Encoding UTF8
     Write-Host '  (generated placeholder ui\index.html)'
 }
