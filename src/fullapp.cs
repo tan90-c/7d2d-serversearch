@@ -26,6 +26,10 @@ class FullApp
 
     static void Main(string[] args)
     {
+        AppDomain.CurrentDomain.UnhandledException += delegate (object s2, UnhandledExceptionEventArgs e2)
+        {
+            try { Console.WriteLine("运行出错: " + e2.ExceptionObject); Console.WriteLine("按任意键退出…"); Console.ReadKey(); } catch { }
+        };
         Directory.CreateDirectory(Work);
         Unpack("api64.gz", "steam_api64.dll", true);
         Unpack("swnet.gz", "com.rlabrecque.steamworks.net.dll", true);
@@ -37,7 +41,27 @@ class FullApp
         try { listener.Start(); }
         catch (Exception e)
         {
-            Console.WriteLine("启动失败(端口 " + PORT + " 可能被占用): " + e.Message);
+            // 端口被占：先判断是不是本程序另一个实例已经在跑
+            try
+            {
+                var rq = (System.Net.HttpWebRequest)System.Net.WebRequest.Create("http://127.0.0.1:" + PORT + "/api/ping");
+                rq.Proxy = null; rq.Timeout = 2000; rq.ReadWriteTimeout = 2000;
+                string pong;
+                using (var rp = rq.GetResponse())
+                using (var rs = rp.GetResponseStream())
+                using (var rd2 = new StreamReader(rs)) pong = rd2.ReadToEnd();
+                if (pong.Contains("pong"))
+                {
+                    Console.WriteLine("服务已在运行中（另一个窗口），正在为你打开页面…");
+                    try { Process.Start(new ProcessStartInfo("rundll32", "url.dll,FileProtocolHandler http://127.0.0.1:" + PORT)); } catch { }
+                    Thread.Sleep(3000);
+                    return;
+                }
+            }
+            catch { }
+            Console.WriteLine("启动失败：端口 " + PORT + " 被其它程序占用。请关闭占用后重新双击运行。");
+            Console.WriteLine("详情: " + e.Message);
+            try { Console.WriteLine("按任意键退出…"); for (int i = 0; i < 600 && !Console.KeyAvailable; i++) Thread.Sleep(100); } catch { Thread.Sleep(8000); }
             return;
         }
         Console.WriteLine("7D2D 服务器搜索·完整版已启动: http://127.0.0.1:" + PORT);
