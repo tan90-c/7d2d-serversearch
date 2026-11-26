@@ -30,6 +30,7 @@ class FullApp
         {
             try { Console.WriteLine("运行出错: " + e2.ExceptionObject); Console.WriteLine("按任意键退出…"); Console.ReadKey(); } catch { }
         };
+        AppDomain.CurrentDomain.ProcessExit += delegate { try { var c = SteamChild; if (c != null && !c.HasExited) c.Kill(); } catch { } };
         Directory.CreateDirectory(Work);
         Unpack("api64.gz", "steam_api64.dll", true);
         Unpack("swnet.gz", "com.rlabrecque.steamworks.net.dll", true);
@@ -65,6 +66,9 @@ class FullApp
             return;
         }
         Console.WriteLine("7D2D 服务器搜索·完整版已启动: http://127.0.0.1:" + PORT);
+        // 成为服务方后清扫上一代硬杀遗留的孤儿抓取进程（会锁住 SteamList.exe 文件）
+        foreach (var z in Process.GetProcessesByName("SteamList"))
+            try { z.Kill(); } catch { } finally { try { z.Dispose(); } catch { } }
         Console.WriteLine("全量搜索需要 Steam 客户端处于登录状态；请保持本窗口开启。");
         try { Process.Start(new ProcessStartInfo("rundll32", "url.dll,FileProtocolHandler http://127.0.0.1:" + PORT)); } catch { }
         while (true)
@@ -121,7 +125,7 @@ class FullApp
         else if (path == "/api/master")
         {
             if (q.ContainsKey("refresh") && q["refresh"] == "1") lock (CacheGate) Cache.Remove("master");
-            body = Encoding.UTF8.GetBytes(Js(Cached("master", 300, FetchMaster)));
+            body = Encoding.UTF8.GetBytes(Js(CachedGate("master", 300, SteamGate, FetchMaster)));
         }
         else if (path == "/api/query")
         {
@@ -186,6 +190,21 @@ class FullApp
         object val = fn();
         lock (CacheGate) Cache[key] = new object[] { DateTime.Now, val };
         return val;
+    }
+    // 串行 + 双重检查：排队等锁的请求若前人已拉取成功则直接复用，避免同窗口重复抓/瞬时 steam_off
+    static object CachedGate(string key, int ttlSec, object gate, Func<object> fn)
+    {
+        lock (gate)
+        {
+            lock (CacheGate)
+            {
+                object[] hit;
+                if (Cache.TryGetValue(key, out hit) && (DateTime.Now - (DateTime)hit[0]).TotalSeconds < ttlSec) return hit[1];
+            }
+            object val = fn();
+            lock (CacheGate) Cache[key] = new object[] { DateTime.Now, val };
+            return val;
+        }
     }
 
     // ---------------- JSON ----------------
@@ -507,6 +526,7 @@ class FullApp
 
     // ---------------- Steam 主控（子进程隔离） ----------------
     static readonly object SteamGate = new object();   // 同时只允许一个抓取子进程
+    static volatile Process SteamChild;                // 退出时清掉，防孤儿进程锁文件
     [System.Runtime.ExceptionServices.HandleProcessCorruptedStateExceptions]
     [System.Security.SecurityCritical]
     static Dictionary<string, object> FetchMaster()
@@ -526,11 +546,15 @@ class FullApp
                 CreateNoWindow = true
             };
             var proc = Process.Start(psi);
+            SteamChild = proc;
             var killer = new Thread(() => { Thread.Sleep(75000); try { if (!proc.HasExited) proc.Kill(); } catch { } });
             killer.IsBackground = true;
             killer.Start();
             string all = proc.StandardOutput.ReadToEnd();
             try { if (!proc.WaitForExit(5000)) proc.Kill(); } catch { }
+            try { if (!proc.HasExited) proc.Kill(); } catch { }
+            lock (SteamGate) { if (ReferenceEquals(SteamChild, proc)) SteamChild = null; }
+            try { proc.Dispose(); } catch { }
             var best = new Dictionary<string, int[]>();
             foreach (var ln in all.Split('\n'))
             {
