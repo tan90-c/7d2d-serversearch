@@ -1,8 +1,8 @@
-// fullapp.cs - 7D2D Server Search (single-file local server app).
-// Build with build.ps1 (or csc directly, see README).
-// Embedded resources: steam_api64.dll(GZ), com.rlabrecque.steamworks.net.dll(GZ),
-// SteamList.exe(GZ), UI page (index.bin), steam_appid.txt - unpacked at runtime to
-// %LOCALAPPDATA%\7D2DServerSearch.
+// fullapp.cs — 7D2D 服务器搜索 完整版单 exe（C#/.NET4，无 Python）
+// 编译: csc /nologo /optimize /platform:x64 /target:exe /out:7D2D-ServerSearch.exe ^
+//   /resource:api64.gz;api64.gz /resource:swnet.gz;swnet.gz /resource:index.bin;index.bin ^
+//   /resource:appid.txt;appid.txt /r:com.rlabrecque.steamworks.net.dll fullapp.cs
+// 内嵌资源: steam_api64.dll(GZ) steamworks.net(GZ) index.html appid — 运行时解包到 %LOCALAPPDATA%\7D2DServerSearch
 using System;
 using System.Collections.Generic;
 using System.Diagnostics;
@@ -93,30 +93,17 @@ class FullApp
             ctype = "application/octet-stream";
             extra = "Content-Disposition: attachment; filename=\"7D2D-ServerSearch.exe\"\r\n";
         }
-        else if (path == "/api/ping") body = Encoding.UTF8.GetBytes("{\"pong\":true}");
+        else if (path == "/api/ping") body = Encoding.UTF8.GetBytes("{\"pong\":true,\"full\":true}");
         else if (path == "/api/master")
         {
             if (q.ContainsKey("refresh") && q["refresh"] == "1") lock (CacheGate) Cache.Remove("master");
             body = Encoding.UTF8.GetBytes(Js(Cached("master", 300, FetchMaster)));
-        }
-        else if (path == "/api/seeds")
-        {
-            if (q.ContainsKey("refresh") && q["refresh"] == "1") lock (CacheGate) Cache.Remove("seeds");
-            body = Encoding.UTF8.GetBytes(Js(Cached("seeds", 45, SweepSeeds)));
         }
         else if (path == "/api/query")
         {
             string addr = q.ContainsKey("addr") ? q["addr"] : "";
             if (addr == "") { status = 400; body = Encoding.UTF8.GetBytes("{\"error\":\"need addr\"}"); }
             else body = Encoding.UTF8.GetBytes(Js(DeepQuery(addr)));
-        }
-        else if (path == "/api/seed")
-        {
-            string add = q.ContainsKey("add") ? q["add"] : "";
-            bool ok = add != "" && AddSeed(add);
-            lock (CacheGate) Cache.Remove("seeds");
-            var o = new Dictionary<string, object> { { "added", ok }, { "seeds", LoadSeeds() } };
-            body = Encoding.UTF8.GetBytes(Js(o));
         }
         else { status = 404; body = Encoding.UTF8.GetBytes("{\"error\":\"not found\"}"); }
         var hdr = Encoding.ASCII.GetBytes("HTTP/1.1 " + status + " OK\r\nContent-Type: " + ctype + "\r\n" + extra + "Access-Control-Allow-Origin: *\r\nCache-Control: no-store\r\nContent-Length: " + body.Length + "\r\nConnection: close\r\n\r\n");
@@ -129,14 +116,23 @@ class FullApp
     static void Unpack(string resName, string outFile, bool gz)
     {
         var dst = Path.Combine(Work, outFile);
-        byte[] data = ReadRes(resName);
-        if (gz)
+        try
         {
-            using (var ms = new MemoryStream(data))
-            using (var gzs = new GZipStream(ms, CompressionMode.Decompress))
-            using (var fs = File.Create(dst)) gzs.CopyTo(fs);
+            byte[] data = ReadRes(resName);
+            if (gz)
+            {
+                using (var ms = new MemoryStream(data))
+                using (var gzs = new GZipStream(ms, CompressionMode.Decompress))
+                using (var fs = File.Create(dst)) gzs.CopyTo(fs);
+            }
+            else File.WriteAllBytes(dst, data);
         }
-        else File.WriteAllBytes(dst, data);
+        catch (IOException)
+        {
+            // 文件被另一实例/子进程占用：旧副本内容相同，直接用
+            if (File.Exists(dst)) return;
+            throw;
+        }
     }
     static byte[] ReadRes(string name)
     {
@@ -459,87 +455,6 @@ class FullApp
         { "middleeast", "me" }, { "africa", "af" }, { "oceania", "oc" }, { "australia", "oc" } };
     static string RegionPref(string reg, string ip) { string r; var k = (reg ?? "").ToLower(); return REGION_ID.TryGetValue(k, out r) ? r : RegionOf(ip); }
 
-    // ---------------- 行构造 ----------------
-    static Dictionary<string, object> TcpRow(string ip, int port, Dictionary<string, string> info)
-    {
-        int mx = PInt(GetD(info, "MaxPlayers", "0"), 0);
-        int free = PInt(GetD(info, "FreePlayerSlots", "0"), 0);
-        bool online = true;
-        return new Dictionary<string, object> {
-            { "addr", ip + ":" + port }, { "ip", ip }, { "port", port },
-            { "name", GetD(info, "GameHost", GetD(info, "GameName", "")) },
-            { "map", GetD(info, "LevelName", "") },
-            { "players", Math.Max(0, mx - free) }, { "max", mx },
-            { "ping", PInt(GetD(info, "_rtt", "0"), 0) },
-            { "password", GetD(info, "IsPasswordProtected", "").ToLower() == "true" },
-            { "secure", GetD(info, "EACEnabled", "").ToLower() == "true" },
-            { "version", FmtServerVersion(GetD(info, "ServerVersion", "?")) },
-            { "region", RegionPref(GetD(info, "Region", ""), ip) },
-            { "prefs", info }, { "online", online } };
-    }
-
-    // ---------------- 种子 ----------------
-    static string SeedsFile { get { return Path.Combine(ExeDir, "seeds.txt"); } }
-    static List<string> LoadSeeds()
-    {
-        var seeds = new List<string>();
-        if (!File.Exists(SeedsFile)) return seeds;
-        string[] lines;
-        try { lines = File.ReadAllLines(SeedsFile, Encoding.UTF8); }
-        catch { try { lines = File.ReadAllLines(SeedsFile, Encoding.GetEncoding(936)); } catch { return seeds; } }
-        foreach (var raw in lines)
-        {
-            string ln = (raw ?? "").TrimStart('\ufeff').Trim();
-            if (ln == "" || ln.StartsWith("#")) continue;
-            var seg = ln.Split(':');
-            if (IPRE.IsMatch(seg[0]) && (seg.Length == 1 || Regex.IsMatch(seg[1], @"^\d+$")))
-                if (!seeds.Contains(ln)) seeds.Add(ln);
-        }
-        return seeds;
-    }
-    static bool AddSeed(string addr)
-    {
-        addr = addr.Trim();
-        if (!Regex.IsMatch(addr, @"^\d{1,3}(\.\d{1,3}){3}:\d{1,5}$")) return false;
-        var cur = LoadSeeds();
-        if (cur.Contains(addr)) return true;
-        File.AppendAllText(SeedsFile, addr + Environment.NewLine, new UTF8Encoding(false));
-        return true;
-    }
-    static Dictionary<string, object> SweepSeeds()
-    {
-        var seeds = LoadSeeds();
-        var res = new List<Dictionary<string, object>>();
-        var lk = new object();
-        var ths = new List<Thread>();
-        foreach (var a in seeds)
-        {
-            string addr = a;
-            var t = new Thread(() => {
-                var sp = SplitAddr(addr); string ip = sp[0]; int port = int.Parse(sp[1]);
-                Dictionary<string, object> item;
-                var info = TcpQuery(ip, port);
-                if (info != null && info.Count > 0) { item = TcpRow(ip, port, info); }
-                else
-                {
-                    var r = A2sInfo(ip, port);
-                    item = new Dictionary<string, object> { { "addr", ip + ":" + port }, { "ip", ip }, { "port", port }, { "region", RegionOf(ip) }, { "online", r["ok"] } };
-                    if (r.ContainsKey("ok") && (bool)r["ok"])
-                    {
-                        item["name"] = r["name"]; item["map"] = r["map"]; item["players"] = r["players"];
-                        item["max"] = r["max"]; item["ping"] = r["rtt"]; item["version"] = FmtVersion((string)r["version"]);
-                        item["password"] = false; item["secure"] = PInt(r["vac"], 0) != 0; item["prefs"] = new Dictionary<string, string>();
-                    }
-                }
-                if (item.ContainsKey("online") && item["online"] is bool && (bool)item["online"])
-                    lock (lk) res.Add(item);
-            });
-            t.IsBackground = true; t.Start(); ths.Add(t);
-        }
-        foreach (var t in ths) t.Join(TimeSpan.FromSeconds(8));
-        return new Dictionary<string, object> { { "mode", "seeds" }, { "servers", res }, { "seed_count", seeds.Count } };
-    }
-
     static Dictionary<string, object> DeepQuery(string addr)
     {
         var sp = SplitAddr(addr); string ip = sp[0]; int port = int.Parse(sp[1]);
@@ -567,12 +482,14 @@ class FullApp
     }
 
     // ---------------- Steam 主控（子进程隔离） ----------------
+    static readonly object SteamGate = new object();   // 同时只允许一个抓取子进程
     [System.Runtime.ExceptionServices.HandleProcessCorruptedStateExceptions]
     [System.Security.SecurityCritical]
     static Dictionary<string, object> FetchMaster()
     {
         var rows = new List<Dictionary<string, object>>();
         string mode = "steam_off";
+        lock (SteamGate)
         try
         {
             var psi = new ProcessStartInfo
